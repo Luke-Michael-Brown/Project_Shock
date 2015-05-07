@@ -13,7 +13,7 @@
 # The things that can be set here are documented in mk/os161.config.mk.
 #
 
-OSTREE=/u1/lm3brown/cs350-os161/root
+OSTREE=/u1/lm3brown/cs350-os161/Project_Shock/root
 PLATFORM=sys161
 MACHINE=mips
 COMPAT_CFLAGS=
