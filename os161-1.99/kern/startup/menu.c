@@ -245,6 +245,20 @@ cmd_pwd(int nargs, char **args)
 }
 
 /*
+ * Command for enableing DB_THREADS debuging
+ */
+static
+int
+cmd_dth(int nargs, char **args)
+{
+    (void)nargs;
+    (void)args;
+
+    dbflags |= DB_THREADS;
+    return 0;
+}
+
+/*
  * Command for running sync.
  */
 static
@@ -288,6 +302,7 @@ cmd_quit(int nargs, char **args)
 	thread_exit();
 	return 0;
 }
+
 
 /*
  * Command for mounting a filesystem.
@@ -430,10 +445,11 @@ static const char *opsmenu[] = {
 	"[p]       Other program             ",
 	"[mount]   Mount a filesystem        ",
 	"[unmount] Unmount a filesystem      ",
-	"[bootfs]  Set \"boot\" filesystem     ",
+	"[bootfs]  Set \"boot\" filesystem   ",
 	"[pf]      Print a file              ",
 	"[cd]      Change directory          ",
 	"[pwd]     Print current directory   ",
+	"[dth]     Enable thread debug msgs  ",
 	"[sync]    Sync filesystems          ",
 	"[panic]   Intentional panic         ",
 	"[q]       Quit and shut down        ",
@@ -543,6 +559,7 @@ static struct {
 	{ "pf",		printfile },
 	{ "cd",		cmd_chdir },
 	{ "pwd",	cmd_pwd },
+	{ "dth",        cmd_dth },
 	{ "sync",	cmd_sync },
 	{ "panic",	cmd_panic },
 	{ "q",		cmd_quit },
