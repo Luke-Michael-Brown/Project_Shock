@@ -32,6 +32,7 @@
 
 #ifdef UW
 #include <lib.h>
+#include "opt-A2.h"
 #endif
 
 #define ARRAYS_CHECKED
@@ -256,5 +257,12 @@ array_add(struct array *a, void *val, unsigned *index_ret)
 DECLARRAY_BYTYPE(stringarray, char);
 DEFARRAY_BYTYPE(stringarray, char, ARRAYINLINE);
 
+#if OPT_A2
+DECLARRAY_BYTYPE(intarray, int);
+DEFARRAY_BYTYPE(intarray, int, ARRAYINLINE);
+
+DECLARRAY_BYTYPE(pidarray, pid_t);
+DEFARRAY_BYTYPE(pidarray, pid_t, ARRAYINLINE);
+#endif // OPT_A2
 
 #endif /* ARRAY_H */

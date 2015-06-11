@@ -787,7 +787,7 @@ thread_exit(void)
 #ifdef UW
 	/* threads for user processes should have detached from their process
 	   in sys__exit */
-	KASSERT(curproc == kproc || curproc == NULL);	
+	KASSERT(curproc == kproc || curproc == NULL);
 	/* kernel threads don't go through sys__exit, so we detach them from kproc here */
 	if (curproc == kproc) {
 	  proc_remthread(cur);

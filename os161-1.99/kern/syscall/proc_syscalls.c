@@ -9,17 +9,31 @@
 #include <thread.h>
 #include <addrspace.h>
 #include <copyinout.h>
+#include <mips/trapframe.h>
+
+pid_t sys_fork(void) {
+    struct proc* child = proc_create_runprogram(strcat(curproc->p_name, "_child"));
+    copy_addrspace(child);
+
+    struct trapframe *cur_tf = curthread->t_stack;
+    struct trapframe *new_tf = kmalloc(sizeof(*cur_tf));
+    memcpy(new_tf, cur_tf, sizeof(*cur_tf));
+    thread_fork(strcat(curproc->p_name, "_child_thread"), child, enter_forked_process, new_tf, 0);
+
+    if(curproc->p_pid == child->p_pid) return 0;
+    else			       return child->p_pid;
+}
 
   /* this implementation of sys__exit does not do anything with the exit code */
   /* this needs to be fixed to get exit() and waitpid() working properly */
 
 void sys__exit(int exitcode) {
-
   struct addrspace *as;
   struct proc *p = curproc;
-  /* for now, just include this to keep the compiler from complaining about
-     an unused variable */
-  (void)exitcode;
+
+  add_exitcode_to_parent(exitcode);
+  notify_children();
+  release_pids();
 
   DEBUG(DB_SYSCALL,"Syscall: _exit(%d)\n",exitcode);
 
@@ -53,9 +67,11 @@ void sys__exit(int exitcode) {
 int
 sys_getpid(pid_t *retval)
 {
-  /* for now, this is just a stub that always returns a PID of 1 */
-  /* you need to fix this to make it work properly */
+#if OPT_A2
+  *retval = curproc->p_pid;
+#else
   *retval = 1;
+#endif
   return(0);
 }
 

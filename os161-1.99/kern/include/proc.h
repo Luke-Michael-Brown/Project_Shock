@@ -36,8 +36,10 @@
  * Note: curproc is defined by <current.h>.
  */
 
+#include <array.h>
 #include <spinlock.h>
 #include <thread.h> /* required for struct threadarray */
+#include "opt-A2.h"
 
 struct addrspace;
 struct vnode;
@@ -68,8 +70,23 @@ struct proc {
   struct vnode *console;                /* a vnode for the console device */
 #endif
 
+#if OPT_A2
+	pid_t p_pid;                       /* Process id */
+	pid_t* p_ppid;			   /* Process's parent pid */
+	struct pidarray p_cpids;           /* Process's children pid's */
+	struct intarray p_cpids_exitcodes; /* Process's children exitcoes */
 	/* add more material here as needed */
+#endif // OPT_A2
 };
+
+#if OPT_A2
+#ifndef PROCINLINE
+#define PROCINLINE INLINE
+#endif
+
+DECLARRAY(proc);
+DEFARRAY(proc, PROCINLINE);
+#endif // OPT_A2
 
 /* This is the process structure for the kernel and for kernel-only threads. */
 extern struct proc *kproc;
@@ -97,8 +114,19 @@ void proc_remthread(struct thread *t);
 /* Fetch the address space of the current process. */
 struct addrspace *curproc_getas(void);
 
+/* Copy parent(current proc) addrspace into it's child  */
+void copy_addrspace(struct proc* child);
+
 /* Change the address space of the current process, and return the old one. */
 struct addrspace *curproc_setas(struct addrspace *);
 
+/* Child with given pid has exited we must update it's exitcode  */
+void add_exitcode_to_parent(int exitcode);
+
+/* Releases newly avilable pids */
+void release_pids(void);
+
+/* Notify children of your death */
+void notify_children(void);
 
 #endif /* _PROC_H_ */
