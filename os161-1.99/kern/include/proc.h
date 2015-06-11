@@ -114,6 +114,7 @@ void proc_remthread(struct thread *t);
 /* Fetch the address space of the current process. */
 struct addrspace *curproc_getas(void);
 
+#if OPT_A2
 /* Copy parent(current proc) addrspace into it's child  */
 void copy_addrspace(struct proc* child);
 
@@ -128,5 +129,6 @@ void release_pids(void);
 
 /* Notify children of your death */
 void notify_children(void);
+#endif // OPT_A2
 
 #endif /* _PROC_H_ */

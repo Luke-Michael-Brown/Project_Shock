@@ -181,6 +181,7 @@ syscall(struct trapframe *tf)
  *
  * Thus, you can trash it and do things another way if you prefer.
  */
+#if OPT_A2
 void
 enter_forked_process(void *voidtf, unsigned long unused)
 {
@@ -189,3 +190,9 @@ enter_forked_process(void *voidtf, unsigned long unused)
     tf->tf_epc += 4;
     curthread->t_stack = tf;
 }
+#else
+void
+enter_forked_process(struct trapframe *tf)
+{
+}
+#endif

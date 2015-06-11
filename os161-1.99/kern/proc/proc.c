@@ -237,9 +237,11 @@ proc_bootstrap(void)
   }
 #endif // UW 
 #if OPT_A2
+  procs_mutex = sem_create("procs_mutex", 1);
+  P(procs_mutex);
   procarray_init(&procs);
   procarray_add(&procs, kproc, NULL);
-  procs_mutex = sem_create("procs_mutex", 1);
+  V(procs_mutex);
 #endif //OPT_A2
 }
 
@@ -296,10 +298,9 @@ proc_create_runprogram(const char *name)
 #endif // UW
 
 #if OPT_A2
-	int num = procarray_num(&procs);
-	int i = 0;
-	
 	P(procs_mutex);
+	int num = procarray_num(&procs);
+	int i = 0;	
 	for(i = 0; i < num; ++i) {
 	    if(procarray_get(&procs, i) == NULL) break;
 	}
@@ -307,15 +308,20 @@ proc_create_runprogram(const char *name)
 	else         procarray_set(&procs, i, proc);
 	V(procs_mutex);
 
-	proc->p_pid = i;
 	pid_t *temp = kmalloc(sizeof(pid_t));
 	spinlock_acquire(&curproc->p_lock);
 	*temp = curproc->p_pid;
 	spinlock_release(&curproc->p_lock);
+
+	spinlock_acquire(&proc->p_lock);
+	proc->p_pid = i;
 	proc->p_ppid = temp;
+	spinlock_release(&proc->p_lock);
 
 	pid_t* child_pid = kmalloc(sizeof(pid_t));
+	spinlock_acquire(&proc->p_lock);
 	*child_pid = proc->p_pid;
+	spinlock_release(&proc->p_lock);
 
 	spinlock_acquire(&curproc->p_lock);
 	pidarray_add(&curproc->p_cpids, child_pid, NULL);
@@ -426,6 +432,7 @@ curproc_setas(struct addrspace *newas)
 	return oldas;
 }
 
+#if OPT_A2
 /*
  * Copy parent(current proc) addrspace into it's child
  */
@@ -444,7 +451,11 @@ copy_addrspace(struct proc* child)
 void 
 add_exitcode_to_parent(int exitcode)
 {
-    if(curproc->p_ppid != NULL) {
+    spinlock_acquire(&curproc->p_lock);
+    bool parent_is_alive = curproc->p_ppid == NULL;
+    spinlock_release(&curproc->p_lock);
+
+    if(parent_is_alive) {
 	P(procs_mutex);
 	spinlock_acquire(&curproc->p_lock);
 	struct proc *parent = procarray_get(&procs, *curproc->p_ppid);
@@ -474,7 +485,11 @@ add_exitcode_to_parent(int exitcode)
 void
 release_pids(void)
 {
-    if(curproc->p_ppid == NULL) {
+    spinlock_acquire(&curproc->p_lock);
+    bool parent_is_dead = curproc->p_ppid == NULL;
+    spinlock_release(&curproc->p_lock);
+
+    if(parent_is_dead) {
 	P(procs_mutex);
 	spinlock_acquire(&curproc->p_lock);
 	procarray_set(&procs, curproc->p_pid, NULL);
@@ -515,4 +530,5 @@ notify_children(void)
 	spinlock_release(&child->p_lock);
     }
 }
+#endif //OPT_A2
 

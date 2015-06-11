@@ -10,7 +10,9 @@
 #include <addrspace.h>
 #include <copyinout.h>
 #include <mips/trapframe.h>
+#include "opt-A2.h"
 
+#if OPT_A2
 pid_t sys_fork(void) {
     struct proc* child = proc_create_runprogram(strcat(curproc->p_name, "_child"));
     copy_addrspace(child);
@@ -23,6 +25,7 @@ pid_t sys_fork(void) {
     if(curproc->p_pid == child->p_pid) return 0;
     else			       return child->p_pid;
 }
+#endif //OPT_A2
 
   /* this implementation of sys__exit does not do anything with the exit code */
   /* this needs to be fixed to get exit() and waitpid() working properly */
@@ -31,9 +34,13 @@ void sys__exit(int exitcode) {
   struct addrspace *as;
   struct proc *p = curproc;
 
+#if OPT_A2
   add_exitcode_to_parent(exitcode);
   notify_children();
   release_pids();
+#else
+  (void)exitcode;
+#endif // OPT_A2
 
   DEBUG(DB_SYSCALL,"Syscall: _exit(%d)\n",exitcode);
 
