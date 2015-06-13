@@ -37,7 +37,7 @@
  */
 
 #include <array.h>
-#include <spinlock.h>
+#include <synch.h>
 #include <thread.h> /* required for struct threadarray */
 #include "opt-A2.h"
 
@@ -46,13 +46,18 @@ struct vnode;
 #ifdef UW
 struct semaphore;
 #endif // UW
+#if OPT_A2
+struct wchan;
+#endif // OPT_A2
 
 /*
  * Process structure.
  */
 struct proc {
 	char *p_name;			/* Name of this process */
-	struct spinlock p_lock;		/* Lock for this structure */
+#if OPT_A2
+	struct lock* p_lock;
+#endif
 	struct threadarray p_threads;	/* Threads in this process */
 
 	/* VM */
@@ -75,6 +80,9 @@ struct proc {
 	pid_t* p_ppid;			   /* Process's parent pid */
 	struct pidarray p_cpids;           /* Process's children pid's */
 	struct intarray p_cpids_exitcodes; /* Process's children exitcoes */
+
+	struct cv* p_cv;
+	int p_exitcode;
 	/* add more material here as needed */
 #endif // OPT_A2
 };
@@ -114,21 +122,22 @@ void proc_remthread(struct thread *t);
 /* Fetch the address space of the current process. */
 struct addrspace *curproc_getas(void);
 
-#if OPT_A2
-/* Copy parent(current proc) addrspace into it's child  */
-void copy_addrspace(struct proc* child);
-
 /* Change the address space of the current process, and return the old one. */
 struct addrspace *curproc_setas(struct addrspace *);
 
-/* Child with given pid has exited we must update it's exitcode  */
-void add_exitcode_to_parent(int exitcode);
+#if OPT_A2
+/* Update exitcode */
+void proc_update_exitcode(int exitcode);
 
-/* Releases newly avilable pids */
-void release_pids(void);
+/* See's if given pid is a valid process  */
+bool is_valid_proc(pid_t pid);
 
-/* Notify children of your death */
-void notify_children(void);
+/* See's if given pid is a child of the current process  */
+bool proc_is_child(pid_t pid);
+
+/* Sleep until your child with the given pid dies, and return exitcode */
+int proc_wait_for_child_to_die(pid_t pid);
 #endif // OPT_A2
 
 #endif /* _PROC_H_ */
+

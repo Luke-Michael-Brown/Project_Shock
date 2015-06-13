@@ -33,7 +33,9 @@
 #include <lib.h>
 #include <mips/trapframe.h>
 #include <thread.h>
+#include <proc.h>
 #include <current.h>
+#include <addrspace.h>
 #include <syscall.h>
 #include "opt-A2.h"
 
@@ -134,7 +136,7 @@ syscall(struct trapframe *tf)
 
 #if OPT_A2
 	case SYS_fork:
-	  retval = sys_fork();
+	  err = sys_fork(tf, &retval);
 	  break;
 #endif // OPT_A2
  
@@ -186,13 +188,23 @@ void
 enter_forked_process(void *voidtf, unsigned long unused)
 {
     (void) unused;
-    struct trapframe* tf = voidtf;
-    tf->tf_epc += 4;
-    curthread->t_stack = tf;
+
+    struct trapframe* ctf = voidtf;
+    struct addrspace* as = (struct addrspace*) ctf->tf_v0;
+
+    ctf->tf_v0 = 0; // Set return value to 0
+    ctf->tf_a3 = 0; // Set error code to success
+    ctf->tf_epc += 4;
+
+    curproc_setas(as);
+    as_activate();
+
+    struct trapframe tf = *ctf;
+    mips_usermode(&tf);
 }
 #else
 void
 enter_forked_process(struct trapframe *tf)
 {
 }
-#endif
+#endif //OPT_A2

@@ -45,7 +45,7 @@ void syscall(struct trapframe *tf);
 
 /* Helper for fork(). You write this. */
 #if OPT_A2
-void enter_forked_process(void *voidtf, unsigned long unsued);
+void enter_forked_process(void *voidtf, unsigned long unused);
 #else
 void enter_forked_process(struct trapframe *tf);
 #endif
@@ -68,7 +68,7 @@ void sys__exit(int exitcode);
 int sys_getpid(pid_t *retval);
 int sys_waitpid(pid_t pid, userptr_t status, int options, pid_t *retval);
 #if OPT_A2
-pid_t sys_fork(void);
+pid_t sys_fork(struct trapframe* ctf, pid_t* retval);
 #endif // OPT_A2
 
 #endif // UW

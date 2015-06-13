@@ -7,23 +7,39 @@
 #include <current.h>
 #include <proc.h>
 #include <thread.h>
+#include <wchan.h>
 #include <addrspace.h>
 #include <copyinout.h>
 #include <mips/trapframe.h>
 #include "opt-A2.h"
 
 #if OPT_A2
-pid_t sys_fork(void) {
-    struct proc* child = proc_create_runprogram(strcat(curproc->p_name, "_child"));
-    copy_addrspace(child);
+pid_t sys_fork(struct trapframe* ctf, pid_t* retval) {
+    char* proc_name = kmalloc(strlen(curproc->p_name) + strlen("_child"));
+    if(proc_name == NULL) return ENOMEM;
+    strcpy(proc_name, curproc->p_name);
+    strcat(proc_name, "_child");
+    struct proc* child = proc_create_runprogram(proc_name);
+    if(child == NULL) return ENOMEM;
 
-    struct trapframe *cur_tf = curthread->t_stack;
-    struct trapframe *new_tf = kmalloc(sizeof(*cur_tf));
-    memcpy(new_tf, cur_tf, sizeof(*cur_tf));
-    thread_fork(strcat(curproc->p_name, "_child_thread"), child, enter_forked_process, new_tf, 0);
+    struct trapframe* tf = kmalloc(sizeof(*ctf));
+    if(tf == NULL) return ENOMEM;
+    memcpy(tf, ctf, sizeof(*ctf));
+    if(tf == NULL) return ENOMEM;
 
-    if(curproc->p_pid == child->p_pid) return 0;
-    else			       return child->p_pid;
+    struct addrspace* as;
+    int result = as_copy(curproc_getas(), &as);
+    if(result) return result;
+    tf->tf_v0 = (uint32_t) as;
+
+    char* thread_name = kmalloc(strlen(proc_name) + strlen("_thread"));
+    if(thread_name == NULL) return ENOMEM;
+    strcpy(thread_name, proc_name);
+    strcat(thread_name, "_thread");
+    thread_fork(thread_name, child, enter_forked_process, tf, 0);
+
+    *retval = child->p_pid;
+    return 0;
 }
 #endif //OPT_A2
 
@@ -35,9 +51,7 @@ void sys__exit(int exitcode) {
   struct proc *p = curproc;
 
 #if OPT_A2
-  add_exitcode_to_parent(exitcode);
-  notify_children();
-  release_pids();
+  proc_update_exitcode(_MKWAIT_EXIT(exitcode));
 #else
   (void)exitcode;
 #endif // OPT_A2
@@ -90,8 +104,20 @@ sys_waitpid(pid_t pid,
 	    int options,
 	    pid_t *retval)
 {
-  int exitstatus;
+#if OPT_A2
+  if(options != 0)        return(EINVAL);
+  if(!is_valid_proc(pid)) return(ESRCH);
+  if(!proc_is_child(pid)) return(ECHILD);
+
+  int exitstatus = proc_wait_for_child_to_die(pid);
+  int result = copyout((void *) &exitstatus, status, sizeof(int));
+  if (result) return(result);
+
+  *retval = pid;
+  return(0);
+#else
   int result;
+  int exitstatus;
 
   /* this is just a stub implementation that always reports an
      exit status of 0, regardless of the actual exit status of
@@ -105,13 +131,13 @@ sys_waitpid(pid_t pid,
   if (options != 0) {
     return(EINVAL);
   }
-  /* for now, just pretend the exitstatus is 0 */
-  exitstatus = 0;
-  result = copyout((void *)&exitstatus,status,sizeof(int));
+
+  result = copyout((void *) &exitstatus, status, sizeof(int));
   if (result) {
     return(result);
   }
   *retval = pid;
   return(0);
+#endif
 }
 

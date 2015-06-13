@@ -408,7 +408,7 @@ mips_usermode(struct trapframe *tf)
  * Performs the necessary initialization so that the user program will
  * get the arguments supplied in argc/argv (note that argv must be a
  * user-level address), and begin executing at the specified entry
- * point. The stack pointer is initialized from the stackptr
+
  * argument. Note that passing argc/argv may use additional stack
  * space on some other platforms (but not on mips).
  *

@@ -45,13 +45,14 @@
 #define PROCINLINE
 
 #include <types.h>
+#include <kern/wait.h>
 #include <proc.h>
 #include <current.h>
 #include <addrspace.h>
 #include <vnode.h>
 #include <vfs.h>
 #include <synch.h>
-#include <kern/fcntl.h>  
+#include <kern/fcntl.h>
 
 /*
  * The process for the kernel; this holds all the kernel-only threads.
@@ -97,7 +98,18 @@ proc_create(const char *name)
 	}
 
 	threadarray_init(&proc->p_threads);
-	spinlock_init(&proc->p_lock);
+#if OPT_A2
+	char* lock_name = kmalloc(strlen(proc->p_name) + strlen("_lock"));
+	if(lock_name == NULL) {
+	    kfree(proc->p_name);
+	    kfree(proc);
+	}
+	strcpy(lock_name, proc->p_name);
+	strcat(lock_name, "_lock");
+	proc->p_lock = lock_create(lock_name);
+
+	proc->p_exitcode = _MKWAIT_STOP(0);
+#endif
 
 	/* VM fields */
 	proc->p_addrspace = NULL;
@@ -114,6 +126,19 @@ proc_create(const char *name)
 
 	pidarray_init(&proc->p_cpids);
 	intarray_init(&proc->p_cpids_exitcodes);
+
+	char* cv_name = kmalloc(strlen(proc->p_name) + strlen("_wait_channel"));
+	if(cv_name == NULL) {
+#if OPT_A2
+	    kfree(lock_name);
+#endif
+	    kfree(proc->p_name);
+	    kfree(proc);
+	    return NULL;
+	}
+	strcpy(cv_name, proc->p_name);
+	strcat(cv_name, "wait_channel");
+	proc->p_cv = cv_create(cv_name);
 #endif // OPT_A2
 
 	return proc;
@@ -136,6 +161,104 @@ proc_destroy(struct proc *proc)
 
 	KASSERT(proc != NULL);
 	KASSERT(proc != kproc);
+
+#if OPT_A2
+	lock_acquire(proc->p_lock);
+	pid_t* parent_pid = proc->p_ppid;
+	lock_release(proc->p_lock);
+
+	if(parent_pid != NULL) {
+	    P(procs_mutex);
+	    struct proc *parent = procarray_get(&procs, *parent_pid);
+	    V(procs_mutex);
+
+	    lock_acquire(proc->p_lock);
+	    pid_t pid = proc->p_pid;
+	    lock_release(proc->p_lock);
+
+	    unsigned int i = 0;
+	    lock_acquire(parent->p_lock);
+	    for(i = 0; i < pidarray_num(&parent->p_cpids); ++i) {
+		if(*pidarray_get(&parent->p_cpids, i) == pid) break;
+	    }
+	    lock_release(parent->p_lock);
+	
+	    int *temp = kmalloc(sizeof(int));
+	    KASSERT(temp != NULL); // If it's null we are in trouble
+
+	    lock_acquire(parent->p_lock);
+	    *temp = proc->p_exitcode;
+	    intarray_set(&parent->p_cpids_exitcodes, i, temp);
+	    lock_release(parent->p_lock);
+	}
+
+	lock_acquire(proc->p_lock);
+	int len = pidarray_num(&proc->p_cpids);
+	lock_release(proc->p_lock);
+
+	for(int i = 0; i < len; ++i) {
+	    lock_acquire(proc->p_lock);
+	    bool is_running = intarray_get(&proc->p_cpids_exitcodes, i) == NULL;
+	    lock_release(proc->p_lock);
+	    if(!is_running) break;
+
+	    lock_acquire(proc->p_lock);
+	    pid_t pid = *pidarray_get(&proc->p_cpids, i);
+	    lock_release(proc->p_lock);
+
+	    P(procs_mutex);
+	    struct proc* child = procarray_get(&procs, pid);
+	    V(procs_mutex);
+
+	    lock_acquire(child->p_lock);
+	    kfree(child->p_ppid);
+	    child->p_ppid = NULL;
+	    lock_release(child->p_lock);
+	}
+
+	lock_acquire(proc->p_lock);
+	bool parent_is_dead = proc->p_ppid == NULL;
+	lock_release(proc->p_lock);
+
+	if(parent_is_dead) {
+	    lock_acquire(proc->p_lock);
+	    pid_t pid = proc->p_pid;
+	    lock_release(proc->p_lock);
+
+	    P(procs_mutex);
+	    procarray_set(&procs, pid, NULL);
+	    V(procs_mutex);
+	}
+
+	lock_acquire(proc->p_lock);
+	unsigned int num = pidarray_num(&proc->p_cpids);
+	lock_release(proc->p_lock);
+	for(unsigned int i = 0; i < num; ++i) {
+	    lock_acquire(proc->p_lock);
+	    bool is_running = intarray_get(&proc->p_cpids_exitcodes, i) == NULL;
+	    pid_t* pid = pidarray_get(&proc->p_cpids, i);
+	    lock_release(proc->p_lock);
+	    if(!is_running) {
+		P(procs_mutex);
+		procarray_set(&procs, *pid, NULL);
+		V(procs_mutex);
+	    }
+	}
+
+	lock_acquire(proc->p_lock);
+	bool parent_is_alive = proc->p_ppid != NULL;
+	lock_release(proc->p_lock);
+
+	if(parent_is_alive) {
+	    P(procs_mutex);
+	    struct proc *parent = procarray_get(&procs, *proc->p_ppid);
+	    V(procs_mutex);
+
+	    lock_acquire(parent->p_lock);
+	    cv_signal(parent->p_cv, parent->p_lock);
+	    lock_release(parent->p_lock);
+	}
+#endif // OPT_A2
 
 	/*
 	 * We don't take p_lock in here because we must have the only
@@ -177,23 +300,25 @@ proc_destroy(struct proc *proc)
 #endif // UW
 
 	threadarray_cleanup(&proc->p_threads);
-	spinlock_cleanup(&proc->p_lock);
-
 	kfree(proc->p_name);
 #if OPT_A2
+	lock_destroy(proc->p_lock);
+
 	if(proc->p_ppid != NULL) kfree(proc->p_ppid);
 
 	while(pidarray_num(&proc->p_cpids) > 0) {
 	    kfree(pidarray_get(&proc->p_cpids, 0));
 	    pidarray_remove(&proc->p_cpids, 0);
 	}
-	pidarray_destroy(&proc->p_cpids);
+	pidarray_cleanup(&proc->p_cpids);
 
 	while(intarray_num(&proc->p_cpids_exitcodes) > 0) {
 	    kfree(intarray_get(&proc->p_cpids_exitcodes, 0));
 	    intarray_remove(&proc->p_cpids_exitcodes, 0);
 	}
-	intarray_destroy(&proc->p_cpids_exitcodes);
+	intarray_cleanup(&proc->p_cpids_exitcodes);
+
+	cv_destroy(proc->p_cv);
 #endif // OPT_A2
 	kfree(proc);
 
@@ -238,10 +363,8 @@ proc_bootstrap(void)
 #endif // UW 
 #if OPT_A2
   procs_mutex = sem_create("procs_mutex", 1);
-  P(procs_mutex);
   procarray_init(&procs);
   procarray_add(&procs, kproc, NULL);
-  V(procs_mutex);
 #endif //OPT_A2
 }
 
@@ -289,19 +412,19 @@ proc_create_runprogram(const char *name)
 		proc->p_cwd = curproc->p_cwd;
 	}
 #else // UW
-	spinlock_acquire(&curproc->p_lock);
+	lock_acquire(curproc->p_lock);
 	if (curproc->p_cwd != NULL) {
 		VOP_INCREF(curproc->p_cwd);
 		proc->p_cwd = curproc->p_cwd;
 	}
-	spinlock_release(&curproc->p_lock);
+	lock_release(curproc->p_lock);
 #endif // UW
 
 #if OPT_A2
 	P(procs_mutex);
 	int num = procarray_num(&procs);
-	int i = 0;	
-	for(i = 0; i < num; ++i) {
+	int i = 1;	
+	for(i = 1; i < num; ++i) {
 	    if(procarray_get(&procs, i) == NULL) break;
 	}
 	if(i == num) procarray_add(&procs, proc, NULL);
@@ -309,24 +432,29 @@ proc_create_runprogram(const char *name)
 	V(procs_mutex);
 
 	pid_t *temp = kmalloc(sizeof(pid_t));
-	spinlock_acquire(&curproc->p_lock);
+	if(temp == NULL) return NULL;
+	lock_acquire(curproc->p_lock);
 	*temp = curproc->p_pid;
-	spinlock_release(&curproc->p_lock);
+	lock_release(curproc->p_lock);
 
-	spinlock_acquire(&proc->p_lock);
+	lock_acquire(proc->p_lock);
 	proc->p_pid = i;
 	proc->p_ppid = temp;
-	spinlock_release(&proc->p_lock);
+	lock_release(proc->p_lock);
 
 	pid_t* child_pid = kmalloc(sizeof(pid_t));
-	spinlock_acquire(&proc->p_lock);
+	if(child_pid == NULL) {
+	    kfree(temp);
+	    return NULL;
+	}
+	lock_acquire(proc->p_lock);
 	*child_pid = proc->p_pid;
-	spinlock_release(&proc->p_lock);
+	lock_release(proc->p_lock);
 
-	spinlock_acquire(&curproc->p_lock);
+	lock_acquire(curproc->p_lock);
 	pidarray_add(&curproc->p_cpids, child_pid, NULL);
 	intarray_add(&curproc->p_cpids_exitcodes, NULL, NULL);
-	spinlock_release(&curproc->p_lock);
+	lock_release(curproc->p_lock);
 #endif // OPT_A2
 
 #ifdef UW
@@ -352,9 +480,9 @@ proc_addthread(struct proc *proc, struct thread *t)
 
 	KASSERT(t->t_proc == NULL);
 
-	spinlock_acquire(&proc->p_lock);
+	lock_acquire(proc->p_lock);
 	result = threadarray_add(&proc->p_threads, t, NULL);
-	spinlock_release(&proc->p_lock);
+	lock_release(proc->p_lock);
 	if (result) {
 		return result;
 	}
@@ -375,19 +503,19 @@ proc_remthread(struct thread *t)
 	proc = t->t_proc;
 	KASSERT(proc != NULL);
 
-	spinlock_acquire(&proc->p_lock);
+	lock_acquire(proc->p_lock);
 	/* ugh: find the thread in the array */
 	num = threadarray_num(&proc->p_threads);
 	for (i=0; i<num; i++) {
 		if (threadarray_get(&proc->p_threads, i) == t) {
 			threadarray_remove(&proc->p_threads, i);
-			spinlock_release(&proc->p_lock);
+			lock_release(proc->p_lock);
 			t->t_proc = NULL;
 			return;
 		}
 	}
 	/* Did not find it. */
-	spinlock_release(&proc->p_lock);
+	lock_release(proc->p_lock);
 	panic("Thread (%p) has escaped from its process (%p)\n", t, proc);
 }
 
@@ -409,9 +537,9 @@ curproc_getas(void)
 	}
 #endif
 
-	spinlock_acquire(&curproc->p_lock);
+	lock_acquire(curproc->p_lock);
 	as = curproc->p_addrspace;
-	spinlock_release(&curproc->p_lock);
+	lock_release(curproc->p_lock);
 	return as;
 }
 
@@ -425,110 +553,78 @@ curproc_setas(struct addrspace *newas)
 	struct addrspace *oldas;
 	struct proc *proc = curproc;
 
-	spinlock_acquire(&proc->p_lock);
+	lock_acquire(proc->p_lock);
 	oldas = proc->p_addrspace;
 	proc->p_addrspace = newas;
-	spinlock_release(&proc->p_lock);
+	lock_release(proc->p_lock);
 	return oldas;
 }
 
 #if OPT_A2
-/*
- * Copy parent(current proc) addrspace into it's child
- */
-void
-copy_addrspace(struct proc* child)
-{
-	struct addrspace *as = curproc_getas();
-	spinlock_acquire(&child->p_lock);
-	child->p_addrspace = as;
-	spinlock_release(&child->p_lock);
-}
-
 /* 
- * Child with given pid has exited we must update it's exitcode.
+ * Update exit code.
  */
 void 
-add_exitcode_to_parent(int exitcode)
+proc_update_exitcode(int exitcode)
 {
-    spinlock_acquire(&curproc->p_lock);
-    bool parent_is_alive = curproc->p_ppid == NULL;
-    spinlock_release(&curproc->p_lock);
-
-    if(parent_is_alive) {
-	P(procs_mutex);
-	spinlock_acquire(&curproc->p_lock);
-	struct proc *parent = procarray_get(&procs, *curproc->p_ppid);
-	spinlock_release(&curproc->p_lock);
-	V(procs_mutex);
-
-	unsigned int i = 0;
-	spinlock_acquire(&parent->p_lock);
-	spinlock_acquire(&curproc->p_lock);
-	for(i = 0; i < pidarray_num(&parent->p_cpids); ++i) {
-		if(*pidarray_get(&parent->p_cpids, i) == curproc->p_pid) break;
-	}
-	spinlock_release(&curproc->p_lock);
-	spinlock_release(&parent->p_lock);
-    
-	int *temp = kmalloc(sizeof(int));
-	*temp = exitcode;
-	spinlock_acquire(&parent->p_lock);
-	intarray_set(&parent->p_cpids_exitcodes, i, temp);
-	spinlock_release(&parent->p_lock);
-    }
+    lock_acquire(curproc->p_lock);
+    curproc->p_exitcode = exitcode;
+    lock_release(curproc->p_lock);
 }
 
 /*
- * Releases newly avilable pids
+ *  See's if given pid is a valid process
  */
-void
-release_pids(void)
+bool
+is_valid_proc(pid_t pid)
 {
-    spinlock_acquire(&curproc->p_lock);
-    bool parent_is_dead = curproc->p_ppid == NULL;
-    spinlock_release(&curproc->p_lock);
+    P(procs_mutex);
+    bool is_valid = procarray_get(&procs, pid) != NULL;
+    V(procs_mutex);
 
-    if(parent_is_dead) {
-	P(procs_mutex);
-	spinlock_acquire(&curproc->p_lock);
-	procarray_set(&procs, curproc->p_pid, NULL);
-	spinlock_release(&curproc->p_lock);
-	V(procs_mutex);
-    }
-
-    spinlock_acquire(&curproc->p_lock);
-    for(int i = 0; pidarray_num(&curproc->p_cpids); ++i) {
-	if(intarray_get(&curproc->p_cpids_exitcodes, i) != NULL) {
-	    P(procs_mutex);
-	    procarray_set(&procs, *pidarray_get(&curproc->p_cpids, i), NULL);
-	    V(procs_mutex);
-	}
-    }
-    spinlock_release(&curproc->p_lock);
+    return is_valid;
 }
 
 /*
- * Notify children of your death
+ *  See's if given pid is a child of the current process
  */
-void
-notify_children(void)
+bool
+proc_is_child(pid_t pid)
 {
-    spinlock_acquire(&curproc->p_lock);
-    int len = pidarray_num(&curproc->p_cpids);
-    spinlock_release(&curproc->p_lock);
+    bool result = false;
 
-    for(int i = 0; i < len; ++i) {
-	P(procs_mutex);
-	spinlock_acquire(&curproc->p_lock);
-	struct proc* child = procarray_get(&procs, *pidarray_get(&curproc->p_cpids, i));
-	spinlock_release(&curproc->p_lock);
-	V(procs_mutex);
-	spinlock_acquire(&child->p_lock);
-	kfree(child->p_ppid);
-	child->p_ppid = NULL;
-	spinlock_release(&child->p_lock);
+    lock_acquire(curproc->p_lock);
+    for(unsigned int i = 0; i < pidarray_num(&curproc->p_cpids); ++i) {
+	if(*pidarray_get(&curproc->p_cpids, i) == pid) {
+	    result = true;
+	    break;
+	}
     }
+    lock_release(curproc->p_lock);
+
+    return result;
+}
+
+/*
+ * Sleep until your child with the given pid dies, and return exitcode
+ */
+int
+proc_wait_for_child_to_die(pid_t pid)
+{
+    unsigned int i;
+    lock_acquire(curproc->p_lock);
+    for(i = 0; i < pidarray_num(&curproc->p_cpids); ++i) {
+	if(*pidarray_get(&curproc->p_cpids, i) == pid) break;
+    }
+
+    while(intarray_get(&curproc->p_cpids_exitcodes, i) == NULL) {
+	cv_wait(curproc->p_cv, curproc->p_lock);
+    }
+
+    int exitcode = *intarray_get(&curproc->p_cpids_exitcodes, i);
+    lock_release(curproc->p_lock);
+
+    return exitcode;
 }
 #endif //OPT_A2
 
