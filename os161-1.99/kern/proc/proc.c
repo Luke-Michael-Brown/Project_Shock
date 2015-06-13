@@ -129,9 +129,7 @@ proc_create(const char *name)
 
 	char* cv_name = kmalloc(strlen(proc->p_name) + strlen("_wait_channel"));
 	if(cv_name == NULL) {
-#if OPT_A2
 	    kfree(lock_name);
-#endif
 	    kfree(proc->p_name);
 	    kfree(proc);
 	    return NULL;

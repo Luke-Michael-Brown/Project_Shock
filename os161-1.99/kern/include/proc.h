@@ -46,9 +46,6 @@ struct vnode;
 #ifdef UW
 struct semaphore;
 #endif // UW
-#if OPT_A2
-struct wchan;
-#endif // OPT_A2
 
 /*
  * Process structure.
