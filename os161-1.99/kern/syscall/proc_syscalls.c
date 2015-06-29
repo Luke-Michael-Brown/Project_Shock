@@ -10,10 +10,13 @@
 #include <addrspace.h>
 #include <copyinout.h>
 #include <mips/trapframe.h>
+#include <spl.h>
 #include "opt-A2.h"
 
 #if OPT_A2
 pid_t sys_fork(struct trapframe* ctf, pid_t* retval) {
+    int spl = splhigh(); // Disable interrupts
+
     char* proc_name = kmalloc(strlen(curproc->p_name) + strlen("_child"));
     if(proc_name == NULL) return ENOMEM;
     strcpy(proc_name, curproc->p_name);
@@ -35,9 +38,10 @@ pid_t sys_fork(struct trapframe* ctf, pid_t* retval) {
     if(thread_name == NULL) return ENOMEM;
     strcpy(thread_name, proc_name);
     strcat(thread_name, "_thread");
-    thread_fork(thread_name, child, enter_forked_process, tf, 0);
+    thread_fork(thread_name, child, enter_forked_process, tf, 42/*(Unused)*/);
 
     *retval = child->p_pid;
+    splx(spl); // Restore interrupts
     return 0;
 }
 #endif //OPT_A2
