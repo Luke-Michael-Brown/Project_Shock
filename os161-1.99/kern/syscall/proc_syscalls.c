@@ -2,6 +2,7 @@
 #include <kern/errno.h>
 #include <kern/unistd.h>
 #include <kern/wait.h>
+#include <kern/fcntl.h>
 #include <lib.h>
 #include <syscall.h>
 #include <current.h>
@@ -11,6 +12,7 @@
 #include <copyinout.h>
 #include <mips/trapframe.h>
 #include <spl.h>
+#include <vfs.h>
 #include "opt-A2.h"
 
 #if OPT_A2
@@ -144,3 +146,115 @@ sys_waitpid(pid_t pid,
 #endif
 }
 
+#if OPT_A2
+int sys_execv(char* program, 
+	      char** args)
+{
+    struct addrspace* as;
+    struct vnode* v;
+    vaddr_t entrypoint, stackptr;
+    int result = 0;
+
+    // Find argc and the length of the args (the number of args)
+    int len  = 0;
+    int argc = 0;
+    for(; true; ++argc) {
+	len += 4;
+	if(args[argc] == NULL) break;
+	for(int j = 0; true; ++j) {
+	    ++len;
+	    if(args[argc][j] == '\0') break;
+	}
+	while((len % 4) != 0) ++len;
+    }
+
+    // Copy args into kernel buffer
+    char** kargs = kmalloc(len);
+    if(kargs == NULL) return ENOMEM;
+
+    char* addr = (char*) kargs + (argc + 1) * 4;
+    for(int i = 0; true; ++i) {
+	if(args[i] == NULL) {
+	    kargs[i] = NULL;
+	    break;
+	}
+	kargs[i] = (char*) (addr - (char*) kargs);
+
+	int j = 0;
+	for(; true; ++j) {
+	    result = copyin((const_userptr_t) &args[i][j], addr, 1);
+	    if(result) {
+		kfree(kargs);
+		return result;
+	    }
+	    ++addr;
+	    if(args[i][j] == '\0') break;
+	}
+
+	while(((int) addr % 4) != 0) {
+	    result = copyin((const_userptr_t) &args[i][j], addr, 1);
+	    if(result) {
+		kfree(kargs);
+		return result;
+	    }
+	    ++addr;
+	}
+    }
+
+    // Open the file
+    result = vfs_open(program, O_RDONLY, 0, &v);
+    if(result) {
+	kfree(kargs);
+	return result;
+    }
+
+    // Destory old addrspace
+    as_deactivate();
+    as = curproc_setas(NULL);
+    as_destroy(as);
+
+    // Create new addrspace
+    as = as_create();
+    if(as == NULL) {
+	vfs_close(v);
+	kfree(kargs);
+	return ENOMEM;
+    }
+
+
+    // Switch and activate new address space
+    curproc_setas(as);
+    as_activate();
+
+    // Load the executalbe
+    result = load_elf(v, &entrypoint);
+    if(result) {
+	vfs_close(v);
+	kfree(kargs);
+	return result;
+    }
+
+    // Done with file
+    vfs_close(v);
+
+    // Define the new user stack in the address space
+    result = as_define_stack(as, &stackptr);
+    if(result) {
+	kfree(kargs);
+	return result;
+    }
+
+    // Copy args into new addrspace and update stackptr etc.
+    stackptr -= len;
+    for(int i = 0; kargs[i] != NULL; ++i) {
+	kargs[i] = (char*) stackptr + (int) kargs[i];
+    }
+    memmove((char*) stackptr, (char*) kargs, len);
+
+    enter_new_process(argc, (userptr_t) stackptr, stackptr, entrypoint);
+
+    panic("enter_new_process returned\n");
+    return EINVAL;
+}
+
+#endif //OPT_A2

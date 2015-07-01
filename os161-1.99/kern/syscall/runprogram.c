@@ -42,8 +42,10 @@
 #include <addrspace.h>
 #include <vm.h>
 #include <vfs.h>
+#include <copyinout.h>
 #include <syscall.h>
 #include <test.h>
+#include "opt-A2.h"
 
 /*
  * Load program "progname" and start running it in usermode.
@@ -52,12 +54,56 @@
  * Calls vfs_open on progname and thus may destroy it.
  */
 int
+#if OPT_A2
+runprogram(char* progname, 
+	   char** args,
+	   int argc)
+#else
 runprogram(char *progname)
+#endif
 {
 	struct addrspace *as;
 	struct vnode *v;
 	vaddr_t entrypoint, stackptr;
 	int result;
+
+#if OPT_A2
+	// Find the length of the args (the number of args)
+	int len  = 0;
+	for(int i = 0; true; ++i) {
+	    len += 4;
+	    if(i == argc) break;
+	    for(int j = 0; true; ++j) {
+		++len;
+		if(args[i][j] == '\0') break;
+	    }
+	    while((len % 4) != 0) ++len;
+	}
+
+	// Copy args into kernel buffer
+	char** kargs = kmalloc(len);
+	if(kargs == NULL) return ENOMEM;
+
+	char* addr = (char*) kargs + (argc + 1) * 4;
+	for(int i = 0; true; ++i) {
+	    if(i == argc) {
+		kargs[i] = NULL;
+		break;
+	    }
+	    kargs[i] = (char*) (addr - (char*) kargs);
+
+	    for(int j = 0; true; ++j) {
+		*addr = args[i][j];
+		++addr;
+		if(args[i][j] == '\0') break;
+	    }
+
+	    while(((int) addr % 4) != 0) {
+		*addr = '\0';
+		++addr;
+	    }
+	}
+#endif
 
 	/* Open the file. */
 	result = vfs_open(progname, O_RDONLY, 0, &v);
@@ -72,6 +118,9 @@ runprogram(char *progname)
 	as = as_create();
 	if (as ==NULL) {
 		vfs_close(v);
+#if OPT_A2
+		kfree(kargs);
+#endif
 		return ENOMEM;
 	}
 
@@ -84,6 +133,9 @@ runprogram(char *progname)
 	if (result) {
 		/* p_addrspace will go away when curproc is destroyed */
 		vfs_close(v);
+#if OPT_A2
+		kfree(kargs);
+#endif
 		return result;
 	}
 
@@ -94,12 +146,28 @@ runprogram(char *progname)
 	result = as_define_stack(as, &stackptr);
 	if (result) {
 		/* p_addrspace will go away when curproc is destroyed */
+#if OPT_A2
+		kfree(kargs);
+#endif
 		return result;
 	}
+
+#if OPT_A2
+	// Copy args into new addrspace and update stackptr etc.
+	stackptr -= len;
+	for(int i = 0; kargs[i] != NULL; ++i) {
+	    kargs[i] = (char*) stackptr + (int) kargs[i];
+	}
+	memmove((char*) stackptr, (char*) kargs, len);
+
+	/* Warp to user mode. */
+	enter_new_process(argc, (userptr_t) stackptr, stackptr, entrypoint);
+#else
 
 	/* Warp to user mode. */
 	enter_new_process(0 /*argc*/, NULL /*userspace addr of argv*/,
 			  stackptr, entrypoint);
+#endif
 	
 	/* enter_new_process does not return. */
 	panic("enter_new_process returned\n");
