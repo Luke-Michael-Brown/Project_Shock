@@ -103,11 +103,14 @@ proc_create(const char *name)
 	if(lock_name == NULL) {
 	    kfree(proc->p_name);
 	    kfree(proc);
+	    return NULL;
 	}
 	strcpy(lock_name, proc->p_name);
 	strcat(lock_name, "_lock");
-	proc->p_lock = lock_create(lock_name);
+	proc->p_cvlock = lock_create(lock_name);
+	kfree(lock_name);
 
+	spinlock_init(&proc->p_lock);
 	proc->p_exitcode = _MKWAIT_STOP(0);
 #endif
 
@@ -129,7 +132,8 @@ proc_create(const char *name)
 
 	char* cv_name = kmalloc(strlen(proc->p_name) + strlen("_wait_channel"));
 	if(cv_name == NULL) {
-	    kfree(lock_name);
+	    lock_destroy(proc->p_cvlock);
+	    spinlock_cleanup(&proc->p_lock);
 	    kfree(proc->p_name);
 	    kfree(proc);
 	    return NULL;
@@ -161,81 +165,81 @@ proc_destroy(struct proc *proc)
 	KASSERT(proc != kproc);
 
 #if OPT_A2
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	pid_t* parent_pid = proc->p_ppid;
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 
 	if(parent_pid != NULL) {
 	    P(procs_mutex);
 	    struct proc *parent = procarray_get(&procs, *parent_pid);
 	    V(procs_mutex);
 
-	    lock_acquire(proc->p_lock);
+	    spinlock_acquire(&proc->p_lock);
 	    pid_t pid = proc->p_pid;
-	    lock_release(proc->p_lock);
+	    spinlock_release(&proc->p_lock);
 
 	    unsigned int i = 0;
-	    lock_acquire(parent->p_lock);
+	    spinlock_acquire(&parent->p_lock);
 	    for(i = 0; i < pidarray_num(&parent->p_cpids); ++i) {
 		if(*pidarray_get(&parent->p_cpids, i) == pid) break;
 	    }
-	    lock_release(parent->p_lock);
+	    spinlock_release(&parent->p_lock);
 	
 	    int *temp = kmalloc(sizeof(int));
 	    KASSERT(temp != NULL); // If it's null we are in trouble
 
-	    lock_acquire(parent->p_lock);
+	    spinlock_acquire(&parent->p_lock);
 	    *temp = proc->p_exitcode;
 	    intarray_set(&parent->p_cpids_exitcodes, i, temp);
-	    lock_release(parent->p_lock);
+	    spinlock_release(&parent->p_lock);
 	}
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	int len = pidarray_num(&proc->p_cpids);
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 
 	for(int i = 0; i < len; ++i) {
-	    lock_acquire(proc->p_lock);
+	    spinlock_acquire(&proc->p_lock);
 	    bool is_running = intarray_get(&proc->p_cpids_exitcodes, i) == NULL;
-	    lock_release(proc->p_lock);
+	    spinlock_release(&proc->p_lock);
 	    if(!is_running) break;
 
-	    lock_acquire(proc->p_lock);
+	    spinlock_acquire(&proc->p_lock);
 	    pid_t pid = *pidarray_get(&proc->p_cpids, i);
-	    lock_release(proc->p_lock);
+	    spinlock_release(&proc->p_lock);
 
 	    P(procs_mutex);
 	    struct proc* child = procarray_get(&procs, pid);
 	    V(procs_mutex);
 
-	    lock_acquire(child->p_lock);
+	    spinlock_acquire(&child->p_lock);
 	    kfree(child->p_ppid);
 	    child->p_ppid = NULL;
-	    lock_release(child->p_lock);
+	    spinlock_release(&child->p_lock);
 	}
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	bool parent_is_dead = proc->p_ppid == NULL;
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 
 	if(parent_is_dead) {
-	    lock_acquire(proc->p_lock);
+	    spinlock_acquire(&proc->p_lock);
 	    pid_t pid = proc->p_pid;
-	    lock_release(proc->p_lock);
+	    spinlock_release(&proc->p_lock);
 
 	    P(procs_mutex);
 	    procarray_set(&procs, pid, NULL);
 	    V(procs_mutex);
 	}
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	unsigned int num = pidarray_num(&proc->p_cpids);
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 	for(unsigned int i = 0; i < num; ++i) {
-	    lock_acquire(proc->p_lock);
+	    spinlock_acquire(&proc->p_lock);
 	    bool is_running = intarray_get(&proc->p_cpids_exitcodes, i) == NULL;
 	    pid_t* pid = pidarray_get(&proc->p_cpids, i);
-	    lock_release(proc->p_lock);
+	    spinlock_release(&proc->p_lock);
 	    if(!is_running) {
 		P(procs_mutex);
 		procarray_set(&procs, *pid, NULL);
@@ -243,18 +247,18 @@ proc_destroy(struct proc *proc)
 	    }
 	}
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	bool parent_is_alive = proc->p_ppid != NULL;
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 
 	if(parent_is_alive) {
 	    P(procs_mutex);
 	    struct proc *parent = procarray_get(&procs, *proc->p_ppid);
 	    V(procs_mutex);
 
-	    lock_acquire(parent->p_lock);
-	    cv_signal(parent->p_cv, parent->p_lock);
-	    lock_release(parent->p_lock);
+	    lock_acquire(parent->p_cvlock);
+	    cv_signal(parent->p_cv, parent->p_cvlock);
+	    lock_release(parent->p_cvlock);
 	}
 #endif // OPT_A2
 
@@ -300,8 +304,9 @@ proc_destroy(struct proc *proc)
 	threadarray_cleanup(&proc->p_threads);
 	kfree(proc->p_name);
 #if OPT_A2
-	lock_destroy(proc->p_lock);
+	lock_destroy(proc->p_cvlock);
 
+	spinlock_cleanup(&proc->p_lock);
 	if(proc->p_ppid != NULL) kfree(proc->p_ppid);
 
 	while(pidarray_num(&proc->p_cpids) > 0) {
@@ -363,6 +368,7 @@ proc_bootstrap(void)
   procs_mutex = sem_create("procs_mutex", 1);
   procarray_init(&procs);
   procarray_add(&procs, kproc, NULL);
+  procarray_add(&procs, kproc, NULL);
 #endif //OPT_A2
 }
 
@@ -410,12 +416,12 @@ proc_create_runprogram(const char *name)
 		proc->p_cwd = curproc->p_cwd;
 	}
 #else // UW
-	lock_acquire(curproc->p_lock);
+	spinlock_acquire(&curproc->p_lock);
 	if (curproc->p_cwd != NULL) {
 		VOP_INCREF(curproc->p_cwd);
 		proc->p_cwd = curproc->p_cwd;
 	}
-	lock_release(curproc->p_lock);
+	spinlock_release(&curproc->p_lock);
 #endif // UW
 
 #if OPT_A2
@@ -431,28 +437,28 @@ proc_create_runprogram(const char *name)
 
 	pid_t *temp = kmalloc(sizeof(pid_t));
 	if(temp == NULL) return NULL;
-	lock_acquire(curproc->p_lock);
+	spinlock_acquire(&curproc->p_lock);
 	*temp = curproc->p_pid;
-	lock_release(curproc->p_lock);
+	spinlock_release(&curproc->p_lock);
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	proc->p_pid = i;
 	proc->p_ppid = temp;
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 
 	pid_t* child_pid = kmalloc(sizeof(pid_t));
 	if(child_pid == NULL) {
 	    kfree(temp);
 	    return NULL;
 	}
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	*child_pid = proc->p_pid;
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 
-	lock_acquire(curproc->p_lock);
+	spinlock_acquire(&curproc->p_lock);
 	pidarray_add(&curproc->p_cpids, child_pid, NULL);
 	intarray_add(&curproc->p_cpids_exitcodes, NULL, NULL);
-	lock_release(curproc->p_lock);
+	spinlock_release(&curproc->p_lock);
 #endif // OPT_A2
 
 #ifdef UW
@@ -478,9 +484,9 @@ proc_addthread(struct proc *proc, struct thread *t)
 
 	KASSERT(t->t_proc == NULL);
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	result = threadarray_add(&proc->p_threads, t, NULL);
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 	if (result) {
 		return result;
 	}
@@ -501,19 +507,19 @@ proc_remthread(struct thread *t)
 	proc = t->t_proc;
 	KASSERT(proc != NULL);
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	/* ugh: find the thread in the array */
 	num = threadarray_num(&proc->p_threads);
 	for (i=0; i<num; i++) {
 		if (threadarray_get(&proc->p_threads, i) == t) {
 			threadarray_remove(&proc->p_threads, i);
-			lock_release(proc->p_lock);
+			spinlock_release(&proc->p_lock);
 			t->t_proc = NULL;
 			return;
 		}
 	}
 	/* Did not find it. */
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 	panic("Thread (%p) has escaped from its process (%p)\n", t, proc);
 }
 
@@ -535,9 +541,9 @@ curproc_getas(void)
 	}
 #endif
 
-	lock_acquire(curproc->p_lock);
+	spinlock_acquire(&curproc->p_lock);
 	as = curproc->p_addrspace;
-	lock_release(curproc->p_lock);
+	spinlock_release(&curproc->p_lock);
 	return as;
 }
 
@@ -551,10 +557,10 @@ curproc_setas(struct addrspace *newas)
 	struct addrspace *oldas;
 	struct proc *proc = curproc;
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	oldas = proc->p_addrspace;
 	proc->p_addrspace = newas;
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 	return oldas;
 }
 
@@ -565,9 +571,9 @@ curproc_setas(struct addrspace *newas)
 void 
 proc_update_exitcode(int exitcode)
 {
-    lock_acquire(curproc->p_lock);
+    spinlock_acquire(&curproc->p_lock);
     curproc->p_exitcode = exitcode;
-    lock_release(curproc->p_lock);
+    spinlock_release(&curproc->p_lock);
 }
 
 /*
@@ -591,14 +597,14 @@ proc_is_child(pid_t pid)
 {
     bool result = false;
 
-    lock_acquire(curproc->p_lock);
+    spinlock_acquire(&curproc->p_lock);
     for(unsigned int i = 0; i < pidarray_num(&curproc->p_cpids); ++i) {
 	if(*pidarray_get(&curproc->p_cpids, i) == pid) {
 	    result = true;
 	    break;
 	}
     }
-    lock_release(curproc->p_lock);
+    spinlock_release(&curproc->p_lock);
 
     return result;
 }
@@ -610,17 +616,17 @@ int
 proc_wait_for_child_to_die(pid_t pid)
 {
     unsigned int i;
-    lock_acquire(curproc->p_lock);
+    lock_acquire(curproc->p_cvlock);
     for(i = 0; i < pidarray_num(&curproc->p_cpids); ++i) {
 	if(*pidarray_get(&curproc->p_cpids, i) == pid) break;
     }
 
     while(intarray_get(&curproc->p_cpids_exitcodes, i) == NULL) {
-	cv_wait(curproc->p_cv, curproc->p_lock);
+	cv_wait(curproc->p_cv, curproc->p_cvlock);
     }
 
     int exitcode = *intarray_get(&curproc->p_cpids_exitcodes, i);
-    lock_release(curproc->p_lock);
+    lock_release(curproc->p_cvlock);
 
     return exitcode;
 }

@@ -37,6 +37,9 @@
 #include <mips/tlb.h>
 #include <addrspace.h>
 #include <vm.h>
+#include <elf.h>
+#include <syscall.h>
+#include "opt-A3.h"
 
 /*
  * Dumb MIPS-only "VM system" that is intended to only be just barely
@@ -122,8 +125,12 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 	switch (faulttype) {
 	    case VM_FAULT_READONLY:
+#if OPT_A3
+		sys__exit(1);
+#else
 		/* We always create pages read-write, so we can't get this */
 		panic("dumbvm: got VM_FAULT_READONLY\n");
+#endif
 	    case VM_FAULT_READ:
 	    case VM_FAULT_WRITE:
 		break;
@@ -170,11 +177,14 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	stackbase = USERSTACK - DUMBVM_STACKPAGES * PAGE_SIZE;
 	stacktop = USERSTACK;
 
+	bool writeable = true;
 	if (faultaddress >= vbase1 && faultaddress < vtop1) {
 		paddr = (faultaddress - vbase1) + as->as_pbase1;
+		writeable = (as->as_permissions1 & PF_W) != 0;
 	}
 	else if (faultaddress >= vbase2 && faultaddress < vtop2) {
 		paddr = (faultaddress - vbase2) + as->as_pbase2;
+		writeable = (as->as_permissions2 & PF_W) != 0;
 	}
 	else if (faultaddress >= stackbase && faultaddress < stacktop) {
 		paddr = (faultaddress - stackbase) + as->as_stackpbase;
@@ -189,23 +199,62 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	/* Disable interrupts on this CPU while frobbing the TLB. */
 	spl = splhigh();
 
+#if OPT_A3
+    for (i=0; i<NUM_TLB; i++) {
+	tlb_read(&ehi, &elo, i);
+	if(!(elo & TLBLO_VALID)) break;
+    }
+
+    ehi = faultaddress;
+    elo = paddr | TLBLO_VALID;
+    if(writeable) elo |= TLBLO_DIRTY;
+
+    DEBUG(DB_VM, "dumbvm: 0x%x -> 0x%x\n", faultaddress, paddr);
+    if(i==NUM_TLB) tlb_random(ehi, elo); // TLB is full simply overwrite a random entry
+    else	   tlb_write(ehi, elo, i);
+
+    splx(spl);
+    return 0;
+#else
 	for (i=0; i<NUM_TLB; i++) {
 		tlb_read(&ehi, &elo, i);
 		if (elo & TLBLO_VALID) {
 			continue;
 		}
-		ehi = faultaddress;
-		elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
-		DEBUG(DB_VM, "dumbvm: 0x%x -> 0x%x\n", faultaddress, paddr);
-		tlb_write(ehi, elo, i);
-		splx(spl);
-		return 0;
 	}
 
 	kprintf("dumbvm: Ran out of TLB entries - cannot handle page fault\n");
 	splx(spl);
 	return EFAULT;
+#endif
 }
+
+#if OPT_A3
+void
+update_readonly_tlb(struct addrspace* as)
+{
+    uint32_t ehi, elo;
+    vaddr_t vbase1 = as->as_vbase1;
+    vaddr_t vtop1 = vbase1 + as->as_npages1 * PAGE_SIZE;
+    vaddr_t vbase2 = as->as_vbase1;
+    vaddr_t vtop2 = vbase1 + as->as_npages1 * PAGE_SIZE;
+
+    for (int i = 0; i < NUM_TLB; ++i) {
+	tlb_read(&ehi, &elo, i);
+	if(elo & TLBLO_VALID) {
+	    vaddr_t faultaddress = ehi;
+	    if (((faultaddress >= vbase1 && faultaddress < vtop1 &&
+		 ((as->as_permissions1 & PF_W) == 0))) ||
+		((faultaddress >= vbase2 && faultaddress < vtop2 &&
+		 ((as->as_permissions2 & PF_W) == 0))))
+	    {
+		elo &= !TLBLO_DIRTY; // Remove writeable
+		tlb_write(ehi, elo, i); // Add back to TLB
+	    }
+	}
+    }
+}
+#endif
 
 struct addrspace *
 as_create(void)
@@ -218,9 +267,11 @@ as_create(void)
 	as->as_vbase1 = 0;
 	as->as_pbase1 = 0;
 	as->as_npages1 = 0;
+	as->as_permissions1 = 0;
 	as->as_vbase2 = 0;
 	as->as_pbase2 = 0;
 	as->as_npages2 = 0;
+	as->as_permissions2 = 0;
 	as->as_stackpbase = 0;
 
 	return as;
@@ -277,20 +328,29 @@ as_define_region(struct addrspace *as, vaddr_t vaddr, size_t sz,
 
 	npages = sz / PAGE_SIZE;
 
+#if OPT_A3
+#else
 	/* We don't use these - all pages are read-write */
 	(void)readable;
 	(void)writeable;
 	(void)executable;
+#endif
 
 	if (as->as_vbase1 == 0) {
 		as->as_vbase1 = vaddr;
 		as->as_npages1 = npages;
+#if OPT_A3
+		as->as_permissions1 |= readable | writeable | executable;
+#endif
 		return 0;
 	}
 
 	if (as->as_vbase2 == 0) {
 		as->as_vbase2 = vaddr;
 		as->as_npages2 = npages;
+#if OPT_A3
+		as->as_permissions2 |= readable | writeable | executable;
+#endif
 		return 0;
 	}
 

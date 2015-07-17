@@ -46,6 +46,7 @@
 #include <syscall.h>
 #include <test.h>
 #include "opt-A2.h"
+#include "opt-A3.h"
 
 /*
  * Load program "progname" and start running it in usermode.

@@ -41,6 +41,8 @@ pid_t sys_fork(struct trapframe* ctf, pid_t* retval) {
     strcpy(thread_name, proc_name);
     strcat(thread_name, "_thread");
     thread_fork(thread_name, child, enter_forked_process, tf, 42/*(Unused)*/);
+    kfree(proc_name);
+    kfree(thread_name);
 
     *retval = child->p_pid;
     splx(spl); // Restore interrupts

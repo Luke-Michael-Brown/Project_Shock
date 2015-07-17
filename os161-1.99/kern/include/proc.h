@@ -53,7 +53,8 @@ struct semaphore;
 struct proc {
 	char *p_name;			/* Name of this process */
 #if OPT_A2
-	struct lock* p_lock;
+	struct spinlock p_lock;
+	struct lock* p_cvlock;
 #endif
 	struct threadarray p_threads;	/* Threads in this process */
 

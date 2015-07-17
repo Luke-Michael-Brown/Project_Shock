@@ -246,7 +246,11 @@ load_elf(struct vnode *v, vaddr_t *entrypoint)
 		result = as_define_region(as,
 					  ph.p_vaddr, ph.p_memsz,
 					  ph.p_flags & PF_R,
+#if OPT_A3
+					  2, // Always start as writeable
+#else
 					  ph.p_flags & PF_W,
+#endif
 					  ph.p_flags & PF_X);
 		if (result) {
 			return result;
@@ -294,7 +298,17 @@ load_elf(struct vnode *v, vaddr_t *entrypoint)
 		if (result) {
 			return result;
 		}
+
+#if OPT_A3
+		// Done editing readonly segments update writeable
+		if(i == 1) as->as_permissions1 &= (ph.p_flags & PF_W);
+		if(i == 0) as->as_permissions2 &= (ph.p_flags & PF_W);
+		update_readonly_tlb(as);
+#endif
 	}
+
+#if OPT_A3
+#endif
 
 	result = as_complete_load(as);
 	if (result) {
