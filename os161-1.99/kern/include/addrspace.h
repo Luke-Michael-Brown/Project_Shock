@@ -37,7 +37,6 @@
 
 #include <vm.h>
 #include "opt-A3.h"
-
 struct vnode;
 
 
@@ -49,19 +48,25 @@ struct vnode;
  */
 
 struct addrspace {
+#if OPT_A3
+    paddr_t* as_pagetable;
+
+    vaddr_t as_vbase1;
+    size_t as_npages1;
+    int as_permissions1;
+
+    vaddr_t as_vbase2;
+    size_t as_npages2;
+    int as_permissions2;
+#else
   vaddr_t as_vbase1;
   paddr_t as_pbase1;
   size_t as_npages1;
-#if OPT_A3
-  int as_permissions1;
-#endif
   vaddr_t as_vbase2;
   paddr_t as_pbase2;
   size_t as_npages2;
-#if OPT_A3
-  int as_permissions2;
-#endif
   paddr_t as_stackpbase;
+#endif
 };
 
 /*

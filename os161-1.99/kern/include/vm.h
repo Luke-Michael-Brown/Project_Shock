@@ -36,7 +36,7 @@
  * You'll probably want to add stuff here.
  */
 
-
+#include <types.h>
 #include <machine/vm.h>
 #include "opt-A3.h"
 
@@ -54,6 +54,7 @@ int vm_fault(int faulttype, vaddr_t faultaddress);
 
 #if OPT_A3
 void update_readonly_tlb(struct addrspace* as);
+paddr_t page_alloc(struct addrspace* as, unsigned long npages);
 #endif
 
 /* Allocate/free kernel heap pages (called by kmalloc/kfree) */
