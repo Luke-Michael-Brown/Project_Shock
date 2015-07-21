@@ -19,7 +19,7 @@
 pid_t sys_fork(struct trapframe* ctf, pid_t* retval) {
     int spl = splhigh(); // Disable interrupts
 
-    char* proc_name = kmalloc(strlen(curproc->p_name) + strlen("_child"));
+    char* proc_name = kmalloc(strlen(curproc->p_name) + strlen("_child") + 1);
     if(proc_name == NULL) return ENOMEM;
     strcpy(proc_name, curproc->p_name);
     strcat(proc_name, "_child");
@@ -36,13 +36,11 @@ pid_t sys_fork(struct trapframe* ctf, pid_t* retval) {
     if(result) return result;
     tf->tf_v0 = (uint32_t) as;
 
-    char* thread_name = kmalloc(strlen(proc_name) + strlen("_thread"));
+    char* thread_name = kmalloc(strlen(proc_name) + strlen("_thread") + 1);
     if(thread_name == NULL) return ENOMEM;
     strcpy(thread_name, proc_name);
     strcat(thread_name, "_thread");
     thread_fork(thread_name, child, enter_forked_process, tf, 42/*(Unused)*/);
-    kfree(proc_name);
-    kfree(thread_name);
 
     *retval = child->p_pid;
     splx(spl); // Restore interrupts
@@ -152,7 +150,10 @@ sys_waitpid(pid_t pid,
 int sys_execv(char* program, 
 	      char** args)
 {
-    struct addrspace* as;
+    int spl = splhigh(); // Disable interrupts
+
+    struct addrspace* old_as; 
+    struct addrspace* new_as;
     struct vnode* v;
     vaddr_t entrypoint, stackptr;
     int result = 0;
@@ -172,7 +173,10 @@ int sys_execv(char* program,
 
     // Copy args into kernel buffer
     char** kargs = kmalloc(len);
-    if(kargs == NULL) return ENOMEM;
+    if(kargs == NULL) {
+	splx(spl); // Restore interrupts
+	return ENOMEM;
+    }
 
     char* addr = (char*) kargs + (argc + 1) * 4;
     for(int i = 0; true; ++i) {
@@ -187,6 +191,7 @@ int sys_execv(char* program,
 	    result = copyin((const_userptr_t) &args[i][j], addr, 1);
 	    if(result) {
 		kfree(kargs);
+		splx(spl); // Restore interrupts
 		return result;
 	    }
 	    ++addr;
@@ -197,6 +202,7 @@ int sys_execv(char* program,
 	    result = copyin((const_userptr_t) &args[i][j], addr, 1);
 	    if(result) {
 		kfree(kargs);
+		splx(spl); // Restore interrupts
 		return result;
 	    }
 	    ++addr;
@@ -207,25 +213,26 @@ int sys_execv(char* program,
     result = vfs_open(program, O_RDONLY, 0, &v);
     if(result) {
 	kfree(kargs);
+	splx(spl); // Restore interrupts
 	return result;
     }
 
     // Destory old addrspace
     as_deactivate();
-    as = curproc_setas(NULL);
-    as_destroy(as);
+    old_as = curproc_setas(NULL);
 
     // Create new addrspace
-    as = as_create();
-    if(as == NULL) {
+    new_as = as_create();
+    if(new_as == NULL) {
 	vfs_close(v);
 	kfree(kargs);
+	splx(spl); // Restore interrupts
 	return ENOMEM;
     }
 
 
     // Switch and activate new address space
-    curproc_setas(as);
+    curproc_setas(new_as);
     as_activate();
 
     // Load the executalbe
@@ -233,16 +240,21 @@ int sys_execv(char* program,
     if(result) {
 	vfs_close(v);
 	kfree(kargs);
+	splx(spl); // Restore interrupts
+	as_destroy(new_as);
+	curproc_setas(old_as);
 	return result;
     }
+    as_destroy(old_as);
 
     // Done with file
     vfs_close(v);
 
     // Define the new user stack in the address space
-    result = as_define_stack(as, &stackptr);
+    result = as_define_stack(new_as, &stackptr);
     if(result) {
 	kfree(kargs);
+	splx(spl); // Restore interrupts
 	return result;
     }
 
@@ -253,6 +265,7 @@ int sys_execv(char* program,
     }
     memmove((char*) stackptr, (char*) kargs, len);
 
+    splx(spl); // Restore interrupts
     enter_new_process(argc, (userptr_t) stackptr, stackptr, entrypoint);
 
     panic("enter_new_process returned\n");

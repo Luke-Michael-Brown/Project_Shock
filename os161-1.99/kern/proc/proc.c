@@ -99,7 +99,7 @@ proc_create(const char *name)
 
 	threadarray_init(&proc->p_threads);
 #if OPT_A2
-	char* lock_name = kmalloc(strlen(proc->p_name) + strlen("_lock"));
+	char* lock_name = kmalloc(strlen(proc->p_name) + strlen("_lock") + 1);
 	if(lock_name == NULL) {
 	    kfree(proc->p_name);
 	    kfree(proc);
@@ -108,7 +108,6 @@ proc_create(const char *name)
 	strcpy(lock_name, proc->p_name);
 	strcat(lock_name, "_lock");
 	proc->p_cvlock = lock_create(lock_name);
-	kfree(lock_name);
 
 	spinlock_init(&proc->p_lock);
 	proc->p_exitcode = _MKWAIT_STOP(0);
@@ -130,7 +129,7 @@ proc_create(const char *name)
 	pidarray_init(&proc->p_cpids);
 	intarray_init(&proc->p_cpids_exitcodes);
 
-	char* cv_name = kmalloc(strlen(proc->p_name) + strlen("_wait_channel"));
+	char* cv_name = kmalloc(strlen(proc->p_name) + strlen("_wait_channel") + 1);
 	if(cv_name == NULL) {
 	    lock_destroy(proc->p_cvlock);
 	    spinlock_cleanup(&proc->p_lock);

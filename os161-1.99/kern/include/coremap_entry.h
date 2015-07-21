@@ -4,11 +4,9 @@
 #include <types.h>
 
 struct coremap_entry {
-    paddr_t pa;
-    bool is_used;
+    int num_of_owners;
     int num_pages_used;
-    struct addrspace* as;
-} coremap_entry_default = {(paddr_t) NULL, false, 0, NULL};
+} coremap_entry_default = {0, 0};
 
 #endif /* _COREMAP_ENTRY_H_ */
 

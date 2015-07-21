@@ -59,7 +59,7 @@ paddr_t lastaddr;
 int first_page_index;
 int number_of_pages;
 
-struct lock* coremap_lock;
+struct spinlock coremap_lock;
 struct coremap_entry* coremap;
 
 bool vm_is_bootstrapped = false;
@@ -74,23 +74,19 @@ static struct spinlock stealmem_lock = SPINLOCK_INITIALIZER;
 void
 vm_bootstrap(void)
 {
-    coremap_lock = lock_create("Coremap_lock");
+    spinlock_init(&coremap_lock);
     ram_getsize(&startaddr, &lastaddr);
+
     coremap = (struct coremap_entry*) PADDR_TO_KVADDR(startaddr);
-    number_of_pages = (lastaddr + PAGE_SIZE - startaddr) / PAGE_SIZE;
+    number_of_pages = (lastaddr - startaddr) / PAGE_SIZE;
+    first_page_index = (sizeof(struct coremap_entry) * number_of_pages) / PAGE_SIZE + 1;
 
-    int i;
-    paddr_t addr;
-    for(i = 0, addr = startaddr; i < number_of_pages; ++i, addr += PAGE_SIZE) {
+    for(int i = 0; i < number_of_pages; ++i) {
 	coremap[i] = coremap_entry_default;
-	coremap[i].pa = addr;
-    }
-    paddr_t firstaddr = startaddr + sizeof(struct coremap_entry) * number_of_pages;
-
-    first_page_index = -1;
-    for(i = 0; i < number_of_pages ; ++i) {
-	coremap[i].is_used = coremap[i].pa < firstaddr;
-	if(!coremap[i].is_used && first_page_index < 0) first_page_index = i;
+	if(i < first_page_index) {
+	    coremap[i].num_of_owners = 1;
+	    coremap[i].num_pages_used = 1;
+	}
     }
 
     vm_is_bootstrapped = true;
@@ -117,29 +113,37 @@ getppages(unsigned long npages)
 }
 
 paddr_t
-page_alloc(struct addrspace* as, unsigned long npages)
+page_alloc(unsigned long npages)
 {
     paddr_t pa = 0;
 
+    spinlock_acquire(&coremap_lock);
+    pa = unprotected_page_alloc(npages);
+    spinlock_release(&coremap_lock);
+
+    return pa;
+}
+
+// For if you already have the coremap locked and need to alloc a page.
+paddr_t
+unprotected_page_alloc(unsigned long npages)
+{
+    paddr_t pa = 0;
     unsigned long n = 0;
-    lock_acquire(coremap_lock);
+
     for(int i = first_page_index; i < number_of_pages; ++i) {
-	if(!coremap[i].is_used) {
-	    ++n;
-	    if(pa == 0) pa = coremap[i].pa;
-	} else {
-	    n = 0;
-	    pa = 0;
-	}
+	if(coremap[i].num_of_owners < 1) ++n;
+	else				 n = 0;
 
 	if(n == npages) {
-	    for(int j = i - n; j <= i; ++j) coremap[j].is_used = true;
-	    coremap[i-n].num_pages_used = npages;
-	    coremap[i-n].as = as;
+	    for(int j = i - n + 1; j <= i; ++j) {
+		coremap[j].num_of_owners = 1;
+	    }
+	    coremap[i-n+1].num_pages_used = npages;
+	    pa = (i-n+1) * PAGE_SIZE + startaddr;
 	    break;
 	}
     }
-    lock_release(coremap_lock);
 
     return pa;
 }
@@ -151,8 +155,8 @@ alloc_kpages(int npages)
 #if OPT_A3
 	paddr_t pa;
 
-	if(vm_is_bootstrapped) pa = page_alloc(curproc_getas(), npages);
-	else pa = getppages(npages);
+	if(vm_is_bootstrapped) pa = page_alloc(npages);
+	else                   pa = getppages(npages);
 
 	if(pa == 0) return 0;
 	return PADDR_TO_KVADDR(pa);
@@ -170,11 +174,24 @@ void
 free_kpages(vaddr_t addr)
 {
 #if OPT_A3
-	/* nothing - leak the memory. */
-	struct addrspace* as = curproc_getas();
+    addr &= PAGE_FRAME;
 
-	(void)as;
-	(void)addr;
+    int i = (KVADDR_TO_PADDR(addr) - startaddr) / PAGE_SIZE;
+    spinlock_acquire(&coremap_lock);
+    if(coremap[i].num_of_owners > 1) {
+	--coremap[i].num_of_owners;
+    } else {
+	paddr_t paddr = startaddr + i * PAGE_SIZE;
+	int num_pages_used = coremap[i].num_pages_used;
+	spinlock_release(&coremap_lock);
+	bzero((void *)PADDR_TO_KVADDR(paddr), num_pages_used * PAGE_SIZE);
+	spinlock_acquire(&coremap_lock);
+	for(int j = i; j < i + coremap[i].num_pages_used; ++j) {
+	    coremap[j].num_of_owners = 0;
+	}
+	coremap[i].num_pages_used = 0;
+    }
+    spinlock_release(&coremap_lock);
 #else
 	(void)addr;
 #endif
@@ -242,7 +259,7 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 	/* Assert that the address space has been set up properly. */
 #if OPT_A3
-	KASSERT(as->as_pagetable != 0);
+	KASSERT(as->as_pagedir != 0);
 	KASSERT(as->as_vbase1 != 0);
 	KASSERT(as->as_npages1 != 0);
 	KASSERT(as->as_vbase2 != 0);
@@ -271,14 +288,38 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 		return EFAULT;
 	}
 
-	int page_number = (faultaddress & PAGE_FRAME) >> 12;
-	int offset = faultaddress & PAGE_OFFSET;
+	int dir_number = faultaddress >> 22;
+	int page_number = (faultaddress << 10) >> 22;
 
-	paddr = as->as_pagetable[page_number];
-	if(as->as_pagetable[page_number] == 0) as->as_pagetable[page_number] = page_alloc(as, 1);
-	paddr = as->as_pagetable[page_number] | offset;
+	if(as->as_pagedir[dir_number] == NULL) {
+	    as->as_pagedir[dir_number] = kmalloc(PAGE_TABLE_SIZE * sizeof(paddr_t));
+	}
+	if(as->as_pagedir[dir_number] == NULL) {
+	    return ENOMEM;
+	}
 
-	if(paddr == 0) return ENOMEM;
+	if(as->as_pagedir[dir_number][page_number] == 0) {
+	    as->as_pagedir[dir_number][page_number] = page_alloc(1);
+	    if(as->as_pagedir[dir_number][page_number] == 0) {
+		return ENOMEM;
+	    }
+	}
+	paddr = as->as_pagedir[dir_number][page_number];
+
+	int index = (paddr - startaddr) / PAGE_SIZE;
+	spinlock_acquire(&coremap_lock);
+	if(coremap[index].num_of_owners > 1) {
+	    as->as_pagedir[dir_number][page_number] = unprotected_page_alloc(1);
+	    if(as->as_pagedir[dir_number][page_number] == 0) {
+		return ENOMEM;
+	    }
+	    memmove((void*) PADDR_TO_KVADDR(as->as_pagedir[dir_number][page_number]),
+		    (const void*) PADDR_TO_KVADDR(paddr),
+		    PAGE_SIZE);
+	    paddr = as->as_pagedir[dir_number][page_number];
+	    --coremap[index].num_of_owners;
+	}
+	spinlock_release(&coremap_lock);
 #else
 	KASSERT(as->as_vbase1 != 0);
 	KASSERT(as->as_pbase1 != 0);
@@ -384,8 +425,8 @@ as_create(void)
     struct addrspace* as = kmalloc(sizeof(struct addrspace));
     if(as == NULL) return NULL;
 
-    as->as_pagetable = (paddr_t*) PADDR_TO_KVADDR(page_alloc(as, 512)); 
-    if(as->as_pagetable == NULL) {
+    as->as_pagedir = kmalloc(PAGE_DIR_SIZE * sizeof(paddr_t*));
+    if(as->as_pagedir == NULL) {
 	kfree(as);
 	return NULL;
     }
@@ -423,7 +464,27 @@ void
 as_destroy(struct addrspace *as)
 {
 #if OPT_A3
-	kfree(as->as_pagetable);
+	for(int  i = 0; i < PAGE_DIR_SIZE; ++i) {
+	    if(as->as_pagedir[i] != NULL) {
+		spinlock_acquire(&coremap_lock);
+		for(int j = 0; j < PAGE_TABLE_SIZE; ++j) {
+		    if(as->as_pagedir[i][j] != 0) {
+			int k = (as->as_pagedir[i][j] - startaddr) / PAGE_SIZE;
+			if(coremap[k].num_of_owners == 1) {
+			    coremap[k].num_pages_used = 0;
+			}
+			--coremap[k].num_of_owners;
+			spinlock_release(&coremap_lock);
+			bzero((void *)PADDR_TO_KVADDR(as->as_pagedir[i][j]), PAGE_SIZE);
+			spinlock_acquire(&coremap_lock);
+		    }
+		}
+		spinlock_release(&coremap_lock);
+		kfree(as->as_pagedir[i]);
+	    }
+	}
+
+	kfree(as->as_pagedir);
 #endif //OPT_A3
 	kfree(as);
 }
@@ -584,12 +645,32 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 	new->as_npages2 = old->as_npages2;
 
 #if OPT_A3
-	for(int i = 0; i < 524288; ++i) {
-	    if(old->as_pagetable[i] != 0) new->as_pagetable[i] = page_alloc(new, 1);
+	for(int i = 0; i < PAGE_DIR_SIZE; ++i) {
+	    if(old->as_pagedir[i] != NULL) {
+		new->as_pagedir[i] = kmalloc(PAGE_TABLE_SIZE * sizeof(paddr_t));
+		if(new->as_pagedir[i] == NULL) {
+		    as_destroy(new);
+		    return ENOMEM;
+		}
+		for(int j = 0; j < PAGE_TABLE_SIZE; ++j) {
+		    if(old->as_pagedir[i][j] != 0) {
+			new->as_pagedir[i][j] = old->as_pagedir[i][j];
+			int index = (new->as_pagedir[i][j] - startaddr) / PAGE_SIZE;
+			spinlock_acquire(&coremap_lock);
+			coremap[index].num_of_owners++;
+			spinlock_release(&coremap_lock);
+		    }
+		}
+	    }
 	}
+
+	as_activate(); // Clear TLB so on next write Copy-on-Write will take effect
 #else
 	/* (Mis)use as_prepare_load to allocate some physical memory. */
-
+	if(as_prepare_load(as) == 0) {
+	    as_destroy(new);
+	    return ENOMEM;
+	}
 
 	KASSERT(new->as_pbase1 != 0);
 	KASSERT(new->as_pbase2 != 0);

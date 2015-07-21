@@ -49,7 +49,7 @@ struct vnode;
 
 struct addrspace {
 #if OPT_A3
-    paddr_t* as_pagetable;
+    paddr_t** as_pagedir;
 
     vaddr_t as_vbase1;
     size_t as_npages1;
